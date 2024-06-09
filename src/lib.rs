@@ -88,52 +88,66 @@ fn compress(data: &mut Reader<File>) -> HashSet<Record> {
 }
 
 fn compare(test: &HashSet<Record>, train: &HashSet<Record>, k: &usize) -> Vec<(Record, String)> {
-    // Will hold the test set's title and predicted class
-    let mut predictions: Vec<(Record, String)> = Vec::new();
+    test.par_iter()
+        .map(|test_record| {
+            // Collect the distance from each train record to the single test record
+            let mut distance: Vec<(&Record, f64)> = train
+                .par_iter()
+                .map(|train_record| {
+                    // Combined compressed length
+                    let combined = format!("{}{}", test_record.text, train_record.text);
+                    let cx1x2 = compressed_len(&combined);
 
-    for test_record in test.iter() {
-        // Collect the distance from each train record to the single test record
-        let mut distance: Vec<(&Record, f64)> = Vec::new();
+                    // Find NCD
+                    let cx1 = &test_record.compressed_len;
+                    let cx2 = &train_record.compressed_len;
+                    let ncd = normalized_compression_distance(cx1, cx2, &cx1x2);
 
-        for train_record in train.iter() {
-            // Combined compressed length
-            let combined = format!("{}{}", test_record.text, train_record.text);
-            let cx1x2 = compressed_len(&combined);
+                    (train_record, ncd)
+                })
+                .collect();
 
-            // Find NCD
-            let cx1 = &test_record.compressed_len;
-            let cx2 = &train_record.compressed_len;
-            let ncd = normalized_compression_distance(cx1, cx2, &cx1x2);
+            // Sort the distances by NCD (smaller is better)
+            distance.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-            // Collect distances along with their corresponding classes
-            distance.push((&train_record, ncd));
+            // Pick the top k records from the sorted distances
+            let top_k = distance.iter().take(*k).collect::<Vec<_>>();
+
+            // Find the most common class
+            let mut class_count = HashMap::new();
+
+            for &(record, _ncd) in top_k.iter() {
+                *class_count.entry(record.class.clone()).or_insert(0) += 1;
+            }
+
+            // Get the predicted class (most common occurrence of class in the top k)
+            let predicted_class = class_count
+                .iter()
+                .max_by_key(|&(_, count)| count)
+                .map(|(class, _)| class.clone())
+                .unwrap();
+
+            // Return the test record and its predicted class
+            (test_record.clone(), predicted_class)
+        })
+        .collect()
+}
+
+fn eval(predictions: &Vec<(Record, String)>) {
+    let mut correctly_predicted: usize = 0;
+    let mut incorrectly_predicted: usize = 0;
+
+    for (record, predicted_class) in predictions {
+        if *record.class == *predicted_class {
+            correctly_predicted += 1;
+        } else {
+            incorrectly_predicted += 1;
         }
-
-        // Sort the distances by NCD (smaller is better)
-        distance.sort_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-        // Pick the top k records from the sorted distances
-        let top_k = distance.iter().take(*k).collect::<Vec<_>>();
-
-        // Find the most common class
-        let mut class_count = HashMap::new();
-
-        for &(record, _ncd) in top_k.iter() {
-            *class_count.entry(record.class.clone()).or_insert(0) += 1;
-        }
-
-        // Get the predicted class (most common occurrence of class in the top k)
-        let predicted_class = class_count
-            .iter()
-            .max_by_key(|&(_, count)| count)
-            .map(|(class, _)| class.clone())
-            .unwrap();
-
-        // Push to prediction the test record, and its predicted class
-        predictions.push((test_record.clone(), predicted_class));
     }
 
-    predictions
+    let correct_percent = correctly_predicted as f64 / predictions.len() as f64;
+
+    println!("Total Predictions: {}\nCorrect Predictions: {}\n Incorrectly Predicted: {}, Percent Correct: {}", predictions.len(), correctly_predicted, incorrectly_predicted, correct_percent);
 }
 
 pub fn run(test: &str, train: &str) -> Result<(), Box<dyn Error>> {
@@ -150,9 +164,7 @@ pub fn run(test: &str, train: &str) -> Result<(), Box<dyn Error>> {
 
     let predictions = compare(&test_map, &train_map, &k);
 
-    for (title, class) in predictions {
-        println!("Predicted Classes: {:#?}\nTitle: {:#?}.\n", class, title);
-    }
+    eval(&predictions);
 
     Ok(())
 }
